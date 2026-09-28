@@ -53,42 +53,57 @@ async function connectRealAudio(){
 function disconnectRealAudio(){captureActive=false;if(captureSource)try{captureSource.disconnect()}catch{};captureSource=null;analyser=null;captureData=null;captureStream=null;$('#captureStatus').textContent='미연결';$('#captureAudioBtn').textContent='🎵 실제 음악에 연결'}
 $('#captureAudioBtn').onclick=connectRealAudio;
 const vizLevels=new Array(64).fill(.035);
-// 참고 영상처럼 매 프레임 빠르게 튀는 오디오 스펙트럼.
-// 막대 위치와 주파수 순서를 1:1로 묶지 않아 좌→우로 흐르는 느낌을 없앤다.
-const vizOrder=Array.from({length:64},(_,i)=>i);
-for(let i=vizOrder.length-1;i>0;i--){let j=(i*37+17)%(i+1);[vizOrder[i],vizOrder[j]]=[vizOrder[j],vizOrder[i]]}
-const vizGain=Array.from({length:64},(_,i)=>.70+(((i*29)%31)/31)*.58);
-function draw(){
+const vizTargets=new Array(64).fill(.035);
+const vizBias=Array.from({length:64},(_,i)=>.72+(((i*47+13)%37)/36)*.42);
+let vizLastShape=0, vizPrevEnergy=0;
+function draw(now=performance.now()){
  requestAnimationFrame(draw);
  let playing=ytReady&&ytPlayer&&ytPlayer.getPlayerState()===YT.PlayerState.PLAYING;
  if(captureActive&&analyser&&captureData){
   analyser.getByteFrequencyData(captureData);
-  const n=captureData.length;
-  // 저역~중고역 중 실제 음악에서 움직임이 큰 영역을 64구간으로 샘플링한다.
-  const lo=1, hi=Math.min(n-1,112);
-  let energy=0;
-  for(let k=lo;k<=hi;k++)energy+=captureData[k];
-  energy/=((hi-lo+1)*255);
+  const n=captureData.length, hi=Math.min(n-1,96);
+  // 화면 위치와 주파수 위치를 완전히 분리한다. 전체 오디오 에너지로만 반응 강도를 정한다.
+  let sum=0,weighted=0,weightSum=0,peak=0;
+  for(let k=1;k<=hi;k++){
+   const x=captureData[k]/255;
+   sum+=x*x;
+   const w=k<18?1.55:(k<45?1.18:.82); // 킥/중역의 박자감을 조금 더 반영
+   weighted+=x*w; weightSum+=w;
+   if(x>peak)peak=x;
+  }
+  const rms=Math.sqrt(sum/hi);
+  const body=weighted/weightSum;
+  let energy=Math.min(1,Math.pow(rms*.62+body*.50+peak*.10,.72));
+  const onset=Math.max(0,energy-vizPrevEnergy);
+  vizPrevEnergy=vizPrevEnergy*.52+energy*.48;
+  const punch=Math.min(1,energy+onset*2.6);
+
+  // 약 30fps마다 64개 막대의 모양을 독립적으로 다시 만든다.
+  // 양 끝을 포함해 어느 막대든 같은 확률로 크게 솟을 수 있다.
+  if(now-vizLastShape>32){
+   vizLastShape=now;
+   for(let i=0;i<bars.length;i++){
+    const r1=Math.random(), r2=Math.random();
+    const irregular=Math.pow(r1,.72)*.72 + Math.pow(r2,2.2)*.28;
+    const floor=.035 + Math.random()*.025;
+    const shared=punch*(.28+Math.random()*.20);
+    const individual=punch*irregular*vizBias[i]*.92;
+    vizTargets[i]=Math.min(.99,floor+shared+individual);
+    // 강한 박자에서는 임의의 막대들이 거의 끝까지 튀도록 한다.
+    if(onset>.055 && Math.random()<.30)vizTargets[i]=Math.max(vizTargets[i],.72+Math.random()*.27);
+   }
+  }
   for(let i=0;i<bars.length;i++){
-   const q=vizOrder[i]/(bars.length-1);
-   // 로그에 가까운 분포 + 인접 bin 평균으로 영상처럼 불규칙한 실루엣 생성
-   const center=Math.min(hi,Math.max(lo,Math.floor(lo+Math.pow(q,.72)*(hi-lo))));
-   let sum=0,c=0;
-   for(let k=Math.max(lo,center-1);k<=Math.min(hi,center+2);k++){sum+=captureData[k];c++}
-   let v=(sum/(c*255))*vizGain[i];
-   // 전체 박자 에너지를 아주 조금 공유하되 각 막대의 실제 주파수 반응을 유지
-   v=Math.min(1,Math.pow(v*.90+energy*.13,.78));
-   const target=.025+v*.955;
-   // 상승/하강 모두 빠르게: 참고 영상의 60fps에 가까운 즉각적인 반응
-   const rate=target>vizLevels[i]?.88:.72;
+   const target=vizTargets[i];
+   const rate=target>vizLevels[i]?.93:.76;
    vizLevels[i]+=(target-vizLevels[i])*rate;
-   if(v<.025)vizLevels[i]*=.70;
    const h=Math.max(.025,Math.min(.99,vizLevels[i]));
    bars[i].style.height=(h*100)+'%';
-   bars[i].style.opacity=String(Math.min(1,.52+h*.58));
+   bars[i].style.opacity=String(Math.min(1,.48+h*.62));
   }
  }else{
-  bars.forEach((b,i)=>{const target=playing?.055:.025;vizLevels[i]+=(target-vizLevels[i])*.45;b.style.height=(vizLevels[i]*100)+'%';b.style.opacity=playing?.45:.28});
+  vizPrevEnergy=0;
+  bars.forEach((b,i)=>{const target=playing?.055:.025;vizLevels[i]+=(target-vizLevels[i])*.45;vizTargets[i]=target;b.style.height=(vizLevels[i]*100)+'%';b.style.opacity=playing?.45:.28});
  }
 }
 draw();
